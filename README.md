@@ -14,6 +14,14 @@ one deck per chapter. Plain HTML/CSS/JS — no build step, no framework.
 Tap a card to flip it, then grade yourself. Grades feed a simplified SM-2 scheduler:
 *Again* repeats within minutes, *Good/Easy* push the card days-to-months into the future.
 
+The decks hold **~1,235 cards** — a near-complete extraction of the book's vocabulary
+(function words and inflections excluded), each with a real sentence from the book.
+
+**Reverse mode** (Settings → *Reverse cards EN→FR*): each word gets a second, independently
+scheduled card in the English→French direction. A reverse card only enters rotation once its
+forward card has been learned (graduated to review), so enabling it never floods the queue.
+Reverse cards share the forward card's mnemonic note.
+
 ## Syncing laptop ↔ phone
 
 Progress (review schedule, stats) **and your mnemonic notes** are stored in a **secret GitHub Gist**:

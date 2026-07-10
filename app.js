@@ -32,7 +32,7 @@ const dayKey = ts => {
 
 // synced across devices (lives in localStorage + the gist)
 let state = {
-  settings: { name: "Stefan", dailyGoal: 20, newPerDay: 10, su: 0 },
+  settings: { name: "Stefan", dailyGoal: 20, newPerDay: 10, reverse: false, su: 0 },
   cards: {},     // id -> {st,step,iv,ef,due,reps,lapses,relearn,u, note,nu}
   reviews: [],   // [ts, cardId, grade 0..3]
 };
@@ -56,6 +56,18 @@ const allCards = (() => {
     return cache;
   };
 })();
+
+// Reverse (EN→FR) cards are virtual twins: same data, id suffixed ":r",
+// their own scheduling record, shared mnemonic note (stored on the base id).
+const isRev = id => id.endsWith(":r");
+const baseId = id => (isRev(id) ? id.slice(0, -2) : id);
+function getStudyCard(id) {
+  const b = allCards().get(baseId(id));
+  if (!b) return null;
+  return isRev(id)
+    ? { ...b, front: b.en, back: b.fr, rev: true }
+    : { ...b, front: b.fr, back: b.en, rev: false };
+}
 
 // ---------- scheduler (simplified SM-2 / Anki-style) ----------
 
@@ -137,6 +149,11 @@ function deckCounts(deck, now) {
       if (rec.due <= now) due++;
       if (rec.st === "review") learned++;
     }
+    if (state.settings.reverse) {
+      const rrec = state.cards[c.id + ":r"];
+      if (rrec && rrec.st) { if (rrec.due <= now) due++; }
+      else if (rec && rec.st === "review") fresh++; // reverse twin unlocked
+    }
   }
   return { due, fresh, learned, total: deck.cards.length };
 }
@@ -148,17 +165,23 @@ let session = null;
 function buildSession(deckN) {
   const now = Date.now();
   const scope = deckN ? LPP_DECKS.filter(d => d.n === deckN) : LPP_DECKS;
-  const due = [], fresh = [];
+  const due = [], fresh = [], freshRev = [];
   let newBudget = Math.max(0, (state.settings.newPerDay || 0) - newIntroducedToday(now));
   for (const deck of scope) {
     for (const c of deck.cards) {
       const rec = state.cards[c.id];
       if (rec && rec.st) { if (rec.due <= now) due.push(c.id); }
       else fresh.push(c.id);
+      if (state.settings.reverse) {
+        const rid = c.id + ":r";
+        const rrec = state.cards[rid];
+        if (rrec && rrec.st) { if (rrec.due <= now) due.push(rid); }
+        else if (rec && rec.st === "review") freshRev.push(rid);
+      }
     }
   }
   due.sort((a, b) => state.cards[a].due - state.cards[b].due);
-  const queue = due.concat(fresh.slice(0, newBudget));
+  const queue = due.concat(fresh.concat(freshRev).slice(0, newBudget));
   session = {
     deckN, queue, later: [], done: 0,
     counts: { again: 0, hard: 0, good: 0, easy: 0 },
@@ -442,7 +465,7 @@ function renderDeck() {
       </div>
       ${open ? `<div class="card-detail">
         <div class="card-en">${esc(card.en)}</div>
-        <div class="card-ph">« ${esc(card.ph)} »</div>
+        ${card.ph ? `<div class="card-ph">« ${esc(card.ph)} »</div>` : ""}
         <div class="card-due">${dueTxt}</div>
         <textarea class="note-box" placeholder="Mnemonic / note… (synced across devices)" data-note="${card.id}">${esc(rec && rec.note || "")}</textarea>
         <div class="note-actions"><button class="note-save" data-save="${card.id}">Save note</button></div>
@@ -505,11 +528,13 @@ function saveNote(id, text) {
 function renderStudy() {
   const id = currentCardId();
   if (!id) return finishSession();
-  const card = allCards().get(id);
+  const card = getStudyCard(id);
   const rec = state.cards[id];
+  const note = (state.cards[baseId(id)] || {}).note;
   const now = Date.now();
   const deckTitle = session.deckN ? card.deck.title : "All decks";
-  const stateTxt = !rec || !rec.st ? "new card" : rec.st === "learn" ? "learning" : "review";
+  const stateTxt = (!rec || !rec.st ? "new card" : rec.st === "learn" ? "learning" : "review")
+    + (card.rev ? " · EN→FR" : "");
   const remaining = session.queue.length + session.later.length;
   const pct = session.done + remaining ? Math.round(100 * session.done / (session.done + remaining)) : 100;
 
@@ -532,12 +557,12 @@ function renderStudy() {
       <div class="study-body">
         <div class="flip-zone">
           <div class="flip-inner ${session.flipped ? "flipped" : ""}" id="flipper">
-            <div class="face front"><div class="word">${esc(card.fr)}</div></div>
+            <div class="face front"><div class="word">${esc(card.front)}</div></div>
             <div class="face back">
-              <div class="fr-small">${esc(card.fr)}</div>
-              <div class="word">${esc(card.en)}</div>
-              <div class="phrase">« ${esc(card.ph)} »</div>
-              ${rec && rec.note ? `<div class="note">💡 ${esc(rec.note)}</div>` : ""}
+              <div class="fr-small">${esc(card.front)}</div>
+              <div class="word">${esc(card.back)}</div>
+              ${card.ph ? `<div class="phrase">« ${esc(card.ph)} »</div>` : ""}
+              ${note ? `<div class="note">💡 ${esc(note)}</div>` : ""}
             </div>
           </div>
         </div>
@@ -547,7 +572,7 @@ function renderStudy() {
         <div id="post-flip" style="width:100%;max-width:400px;display:${session.flipped ? "block" : "none"}">
           <div class="grade-prompt">${mascotHTML("#A9C6EC", "neutral", 34)}<span>How well did you know it?</span></div>
           <div class="grades">${grades}</div>
-          <div style="text-align:center"><button class="note-link" id="edit-note">${rec && rec.note ? "✎ edit mnemonic" : "＋ add mnemonic"}</button></div>
+          <div style="text-align:center"><button class="note-link" id="edit-note">${note ? "✎ edit mnemonic" : "＋ add mnemonic"}</button></div>
         </div>
       </div>
     </div>`;
@@ -561,7 +586,7 @@ function renderStudy() {
   });
   document.querySelectorAll("[data-grade]").forEach(b =>
     b.addEventListener("click", () => gradeCurrent(+b.dataset.grade)));
-  $("#edit-note").addEventListener("click", () => openNoteModal(id));
+  $("#edit-note").addEventListener("click", () => openNoteModal(baseId(id)));
 }
 
 function openNoteModal(id) {
@@ -682,6 +707,7 @@ function renderSettings() {
         <div class="set-row"><label>Your name</label><input class="set-input" id="set-name" value="${esc(s.name)}"></div>
         <div class="set-row"><label>Daily goal<span class="hint-sub">reviews per day</span></label><input class="set-input" id="set-goal" type="number" min="1" value="${s.dailyGoal}"></div>
         <div class="set-row"><label>New cards / day<span class="hint-sub">across all decks</span></label><input class="set-input" id="set-new" type="number" min="0" value="${s.newPerDay}"></div>
+        <div class="set-row"><label>Reverse cards (EN→FR)<span class="hint-sub">a word unlocks once learned FR→EN; has its own schedule</span></label><input type="checkbox" id="set-rev" ${s.reverse ? "checked" : ""} style="width:22px;height:22px;accent-color:#A9C6EC;flex:none"></div>
       </div>
 
       <div class="set-card">
@@ -718,10 +744,11 @@ function renderSettings() {
     s.name = $("#set-name").value.trim() || "ami";
     s.dailyGoal = Math.max(1, +$("#set-goal").value || 20);
     s.newPerDay = Math.max(0, +$("#set-new").value || 0);
+    s.reverse = $("#set-rev").checked;
     s.su = Date.now();
     saveState(); scheduleSync();
   };
-  ["set-name", "set-goal", "set-new"].forEach(id => $("#" + id).addEventListener("change", saveSettings));
+  ["set-name", "set-goal", "set-new", "set-rev"].forEach(id => $("#" + id).addEventListener("change", saveSettings));
 
   $("#set-token").addEventListener("change", () => {
     device.token = $("#set-token").value.trim();
