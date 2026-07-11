@@ -1,6 +1,6 @@
 /* Offline cache for Le Petit Prince cards.
    Bump CACHE version whenever app files change so clients pick up updates. */
-const CACHE = "ppa-v3";
+const CACHE = "ppa-v4";
 const ASSETS = ["./", "./index.html", "./style.css", "./app.js", "./decks.js", "./manifest.webmanifest", "./icon.svg"];
 
 self.addEventListener("install", e => {

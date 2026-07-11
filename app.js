@@ -5,7 +5,7 @@
 
 "use strict";
 
-const APP_VERSION = "3";
+const APP_VERSION = "4";
 const MIN = 60000, DAY = 86400000;
 const GIST_FILE = "petit-prince-anki-sync.json";
 const STATE_KEY = "ppa.state";
@@ -160,6 +160,38 @@ function deckCounts(deck, now) {
 
 let session = null;
 
+// What could a session contain right now? (also powers button labels/toasts)
+function availability(deckN, now) {
+  const scope = deckN ? LPP_DECKS.filter(d => d.n === deckN) : LPP_DECKS;
+  let dueNow = 0, fresh = 0, soonest = null;
+  for (const deck of scope) for (const c of deck.cards) {
+    const rec = state.cards[c.id];
+    if (rec && rec.st) {
+      if (rec.due <= now) dueNow++;
+      else if (soonest === null || rec.due < soonest) soonest = rec.due;
+    } else fresh++;
+  }
+  const budget = Math.max(0, (state.settings.newPerDay || 0) - newIntroducedToday(now));
+  return { dueNow, fresh, newToday: Math.min(fresh, budget), budget, soonest };
+}
+
+function fmtIn(ms) {
+  if (ms < MIN) return "in <1m";
+  if (ms < 60 * MIN) return "in " + Math.round(ms / MIN) + "m";
+  if (ms < 24 * 60 * MIN) return "in " + Math.round(ms / (60 * MIN)) + "h";
+  const d = new Date(Date.now() + ms);
+  return dayKey(d.getTime()) === dayKey(Date.now() + DAY) ? "tomorrow" : "on " + d.toLocaleDateString();
+}
+
+// Why is there nothing to study? Human-readable reason for a toast.
+function emptyReason(deckN, now) {
+  const a = availability(deckN, now);
+  if (a.fresh > 0 && a.budget === 0)
+    return "Daily new-card limit reached — raise it in Settings, or come back tomorrow ✨";
+  if (a.soonest) return "All caught up ✓ Next review " + fmtIn(a.soonest - now);
+  return "All caught up ✨";
+}
+
 function buildSession(deckN) {
   const now = Date.now();
   const scope = deckN ? LPP_DECKS.filter(d => d.n === deckN) : LPP_DECKS;
@@ -174,6 +206,16 @@ function buildSession(deckN) {
   }
   due.sort((a, b) => state.cards[a].due - state.cards[b].due);
   const queue = due.concat(fresh.slice(0, newBudget));
+  if (!queue.length) {
+    // learn ahead: pull in learning cards due within the next 30 minutes
+    const soon = [];
+    for (const deck of scope) for (const c of deck.cards) {
+      const rec = state.cards[c.id];
+      if (rec && rec.st === "learn" && rec.due <= now + 30 * MIN) soon.push(c.id);
+    }
+    soon.sort((a, b) => state.cards[a].due - state.cards[b].due);
+    queue.push(...soon);
+  }
   session = {
     deckN, queue, later: [], done: 0,
     counts: { again: 0, hard: 0, good: 0, easy: 0 },
@@ -391,12 +433,10 @@ function renderHome() {
   const h = new Date(now).getHours();
   const greet = h < 5 ? "Bonsoir" : h < 12 ? "Bonjour" : h < 18 ? "Bon après-midi" : "Bonsoir";
   const st = streak(now);
-  let totalDue = 0, totalNew = 0;
 
   const rows = LPP_DECKS.map(deck => {
     const [tint, accent] = deckColors(deck);
     const c = deckCounts(deck, now);
-    totalDue += c.due; totalNew += c.fresh;
     const parts = [];
     if (c.due) parts.push(c.due + " due");
     if (c.fresh) parts.push(c.fresh + " new");
@@ -428,9 +468,17 @@ function renderHome() {
       <div class="ver-note">v${APP_VERSION} · updates install in the background — a popup will confirm when a new version is ready</div>
       <div class="section-label">Le Petit Prince · your decks</div>
       ${rows}
-      <button class="btn-primary" id="study-all" ${totalDue + totalNew ? "" : "disabled"}>
-        ${totalDue + totalNew ? "Study now →" : "Nothing due — reviens demain ✨"}
-      </button>
+      ${(() => {
+        const a = availability(null, now);
+        const n = a.dueNow + a.newToday;
+        if (n > 0) return `<button class="btn-primary" id="study-all">Study now (${n}) →</button>`;
+        if (a.soonest && a.soonest - now <= 30 * MIN)
+          return `<button class="btn-primary" id="study-all">Study ahead — next due ${fmtIn(a.soonest - now)} →</button>`;
+        const why = a.fresh > 0 && a.budget === 0
+          ? "Daily new-card limit reached ✓"
+          : a.soonest ? "Done ✓ next review " + fmtIn(a.soonest - now) : "All caught up ✨";
+        return `<button class="btn-primary" disabled>${why}</button>`;
+      })()}
     </div>
     ${navHTML("home")}`;
 
@@ -443,7 +491,11 @@ function renderHome() {
   };
   $("#dir-fr").addEventListener("click", () => setDir("fr"));
   $("#dir-en").addEventListener("click", () => setDir("en"));
-  $("#study-all").addEventListener("click", () => { if (buildSession(null)) { view = { name: "study" }; renderStudy(); } });
+  const sa = $("#study-all");
+  if (sa) sa.addEventListener("click", () => {
+    if (buildSession(null)) { view = { name: "study" }; renderStudy(); }
+    else toast(emptyReason(null, Date.now()));
+  });
   document.querySelectorAll("[data-deck]").forEach(b =>
     b.addEventListener("click", () => { view = { name: "deck", deckN: +b.dataset.deck }; render(); }));
 }
@@ -503,7 +555,10 @@ function renderDeck() {
   bindNav();
   $("#back").addEventListener("click", () => { view = { name: "home" }; render(); });
   $("#sync-btn").addEventListener("click", () => syncNow(false));
-  $("#study-deck").addEventListener("click", () => { if (buildSession(deck.n)) { view = { name: "study", deckN: deck.n }; renderStudy(); } });
+  $("#study-deck").addEventListener("click", () => {
+    if (buildSession(deck.n)) { view = { name: "study", deckN: deck.n }; renderStudy(); }
+    else toast(emptyReason(deck.n, Date.now()));
+  });
   document.querySelectorAll(".card-row").forEach(row => {
     row.addEventListener("click", e => {
       if (e.target.closest(".note-box, .note-save")) return;
