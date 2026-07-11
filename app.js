@@ -5,6 +5,7 @@
 
 "use strict";
 
+const APP_VERSION = "3";
 const MIN = 60000, DAY = 86400000;
 const GIST_FILE = "petit-prince-anki-sync.json";
 const STATE_KEY = "ppa.state";
@@ -32,7 +33,7 @@ const dayKey = ts => {
 
 // synced across devices (lives in localStorage + the gist)
 let state = {
-  settings: { name: "Stefan", dailyGoal: 20, newPerDay: 10, reverse: false, su: 0 },
+  settings: { name: "Stefan", dailyGoal: 20, newPerDay: 10, dir: "fr", su: 0 },
   cards: {},     // id -> {st,step,iv,ef,due,reps,lapses,relearn,u, note,nu}
   reviews: [],   // [ts, cardId, grade 0..3]
 };
@@ -57,14 +58,16 @@ const allCards = (() => {
   };
 })();
 
-// Reverse (EN→FR) cards are virtual twins: same data, id suffixed ":r",
-// their own scheduling record, shared mnemonic note (stored on the base id).
+// Study direction is a global switch (Home screen): FR→EN or EN→FR.
+// Same card, same schedule — only which side is shown first changes.
+// (baseId tolerates legacy ":r" ids from the old reverse experiment.)
 const isRev = id => id.endsWith(":r");
 const baseId = id => (isRev(id) ? id.slice(0, -2) : id);
 function getStudyCard(id) {
   const b = allCards().get(baseId(id));
   if (!b) return null;
-  return isRev(id)
+  const rev = state.settings.dir === "en";
+  return rev
     ? { ...b, front: b.en, back: b.fr, rev: true }
     : { ...b, front: b.fr, back: b.en, rev: false };
 }
@@ -149,11 +152,6 @@ function deckCounts(deck, now) {
       if (rec.due <= now) due++;
       if (rec.st === "review") learned++;
     }
-    if (state.settings.reverse) {
-      const rrec = state.cards[c.id + ":r"];
-      if (rrec && rrec.st) { if (rrec.due <= now) due++; }
-      else if (rec && rec.st === "review") fresh++; // reverse twin unlocked
-    }
   }
   return { due, fresh, learned, total: deck.cards.length };
 }
@@ -165,23 +163,17 @@ let session = null;
 function buildSession(deckN) {
   const now = Date.now();
   const scope = deckN ? LPP_DECKS.filter(d => d.n === deckN) : LPP_DECKS;
-  const due = [], fresh = [], freshRev = [];
+  const due = [], fresh = [];
   let newBudget = Math.max(0, (state.settings.newPerDay || 0) - newIntroducedToday(now));
   for (const deck of scope) {
     for (const c of deck.cards) {
       const rec = state.cards[c.id];
       if (rec && rec.st) { if (rec.due <= now) due.push(c.id); }
       else fresh.push(c.id);
-      if (state.settings.reverse) {
-        const rid = c.id + ":r";
-        const rrec = state.cards[rid];
-        if (rrec && rrec.st) { if (rrec.due <= now) due.push(rid); }
-        else if (rec && rec.st === "review") freshRev.push(rid);
-      }
     }
   }
   due.sort((a, b) => state.cards[a].due - state.cards[b].due);
-  const queue = due.concat(fresh.concat(freshRev).slice(0, newBudget));
+  const queue = due.concat(fresh.slice(0, newBudget));
   session = {
     deckN, queue, later: [], done: 0,
     counts: { again: 0, hard: 0, good: 0, easy: 0 },
@@ -419,13 +411,21 @@ function renderHome() {
     </button>`;
   }).join("");
 
+  const dir = state.settings.dir === "en" ? "en" : "fr";
   $("#app").innerHTML = `
     <div class="screen">
       <div class="topbar">
         <h1 class="greet">${greet}, ${esc(state.settings.name || "ami")}</h1>
         <button class="icon-btn" id="sync-btn" title="Sync">⇅</button>
       </div>
-      <div class="chip"><span class="flame"><i></i><i></i></span>${st} day streak</div>
+      <div class="topbar" style="margin-top:12px">
+        <div class="chip" style="margin-top:0"><span class="flame"><i></i><i></i></span>${st} day streak</div>
+        <div class="dir-toggle" title="Study direction">
+          <button id="dir-fr" class="${dir === "fr" ? "active" : ""}">FR→EN</button>
+          <button id="dir-en" class="${dir === "en" ? "active" : ""}">EN→FR</button>
+        </div>
+      </div>
+      <div class="ver-note">v${APP_VERSION} · updates install in the background — a popup will confirm when a new version is ready</div>
       <div class="section-label">Le Petit Prince · your decks</div>
       ${rows}
       <button class="btn-primary" id="study-all" ${totalDue + totalNew ? "" : "disabled"}>
@@ -436,6 +436,13 @@ function renderHome() {
 
   bindNav();
   $("#sync-btn").addEventListener("click", () => syncNow(false));
+  const setDir = d => {
+    state.settings.dir = d; state.settings.su = Date.now();
+    saveState(); scheduleSync(); renderHome();
+    toast(d === "en" ? "Studying English → French" : "Studying French → English");
+  };
+  $("#dir-fr").addEventListener("click", () => setDir("fr"));
+  $("#dir-en").addEventListener("click", () => setDir("en"));
   $("#study-all").addEventListener("click", () => { if (buildSession(null)) { view = { name: "study" }; renderStudy(); } });
   document.querySelectorAll("[data-deck]").forEach(b =>
     b.addEventListener("click", () => { view = { name: "deck", deckN: +b.dataset.deck }; render(); }));
@@ -648,7 +655,7 @@ function renderStats() {
   const pct = Math.min(100, Math.round(100 * today / goal));
   const st = streak(now);
   const ret = retention30(now);
-  const learned = Object.values(state.cards).filter(r => r.st === "review").length;
+  const learned = Object.entries(state.cards).filter(([id, r]) => r.st === "review" && !isRev(id)).length;
   const totalReviews = state.reviews.length;
 
   const days = [];
@@ -707,7 +714,6 @@ function renderSettings() {
         <div class="set-row"><label>Your name</label><input class="set-input" id="set-name" value="${esc(s.name)}"></div>
         <div class="set-row"><label>Daily goal<span class="hint-sub">reviews per day</span></label><input class="set-input" id="set-goal" type="number" min="1" value="${s.dailyGoal}"></div>
         <div class="set-row"><label>New cards / day<span class="hint-sub">across all decks</span></label><input class="set-input" id="set-new" type="number" min="0" value="${s.newPerDay}"></div>
-        <div class="set-row"><label>Reverse cards (EN→FR)<span class="hint-sub">a word unlocks once learned FR→EN; has its own schedule</span></label><input type="checkbox" id="set-rev" ${s.reverse ? "checked" : ""} style="width:22px;height:22px;accent-color:#A9C6EC;flex:none"></div>
       </div>
 
       <div class="set-card">
@@ -744,11 +750,10 @@ function renderSettings() {
     s.name = $("#set-name").value.trim() || "ami";
     s.dailyGoal = Math.max(1, +$("#set-goal").value || 20);
     s.newPerDay = Math.max(0, +$("#set-new").value || 0);
-    s.reverse = $("#set-rev").checked;
     s.su = Date.now();
     saveState(); scheduleSync();
   };
-  ["set-name", "set-goal", "set-new", "set-rev"].forEach(id => $("#" + id).addEventListener("change", saveSettings));
+  ["set-name", "set-goal", "set-new"].forEach(id => $("#" + id).addEventListener("change", saveSettings));
 
   $("#set-token").addEventListener("change", () => {
     device.token = $("#set-token").value.trim();
@@ -796,6 +801,28 @@ loadAll();
 render();
 if (device.token) syncNow(true);
 
+// Update flow: sw.js installs the new version in the background (skipWaiting +
+// clients.claim), so once the fresh worker reaches "activated" a reload serves
+// the new files. Pop a confirmation banner instead of leaving the user guessing.
+function showUpdateBanner() {
+  if ($("#update-banner")) return;
+  const b = document.createElement("button");
+  b.id = "update-banner";
+  b.className = "update-banner";
+  b.textContent = "✨ New version downloaded — tap to reload";
+  b.addEventListener("click", () => location.reload());
+  $("#app").appendChild(b);
+}
+
 if ("serviceWorker" in navigator && location.protocol !== "file:") {
-  navigator.serviceWorker.register("./sw.js").catch(() => {});
+  navigator.serviceWorker.register("./sw.js").then(reg => {
+    if (reg.waiting && navigator.serviceWorker.controller) showUpdateBanner();
+    reg.addEventListener("updatefound", () => {
+      const nw = reg.installing;
+      if (!nw || !navigator.serviceWorker.controller) return; // first install, nothing to announce
+      nw.addEventListener("statechange", () => {
+        if (nw.state === "activated" || nw.state === "installed") showUpdateBanner();
+      });
+    });
+  }).catch(() => {});
 }

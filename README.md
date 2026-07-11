@@ -17,10 +17,13 @@ Tap a card to flip it, then grade yourself. Grades feed a simplified SM-2 schedu
 The decks hold **~1,235 cards** — a near-complete extraction of the book's vocabulary
 (function words and inflections excluded), each with a real sentence from the book.
 
-**Reverse mode** (Settings → *Reverse cards EN→FR*): each word gets a second, independently
-scheduled card in the English→French direction. A reverse card only enters rotation once its
-forward card has been learned (graduated to review), so enabling it never floods the queue.
-Reverse cards share the forward card's mnemonic note.
+**Study direction**: the FR→EN / EN→FR switch at the top of the Home screen flips which side
+of every card is shown first. Same cards, same schedule — just asked from the other side.
+The choice syncs across devices.
+
+**Updates**: the Home screen shows the running version (`vN`); `APP_VERSION` in `app.js` and
+`CACHE` in `sw.js` must be bumped together on each deploy. Clients install the update in the
+background and show a "tap to reload" popup when it's ready.
 
 ## Syncing laptop ↔ phone
 
